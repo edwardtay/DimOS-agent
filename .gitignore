@@ -13,6 +13,8 @@ venv/
 
 # Runtime artifacts
 missions.jsonl
+memory.json
+.pytest_cache/
 
 # OS / editor
 .DS_Store

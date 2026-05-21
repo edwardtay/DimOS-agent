@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .go2_sim import Go2Sim
+from .memory import AgentMemory
 
 TOOLS = [
     {
@@ -46,6 +47,32 @@ TOOLS = [
         },
     },
     {
+        "name": "remember",
+        "description": "Persist a fact across missions (e.g. 'alice_last_seen' -> '(3.1, 0.4) at 14:22').",
+        "input_schema": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}, "value": {"type": "string"}},
+            "required": ["key", "value"],
+        },
+    },
+    {
+        "name": "recall",
+        "description": "Retrieve previously-remembered facts. Pass an optional substring to filter.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+        },
+    },
+    {
+        "name": "forget",
+        "description": "Delete a remembered fact by key.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+        },
+    },
+    {
         "name": "recharge_at_dock",
         "description": "If the robot is within 0.6m of the charging dock, recharge to 100%. Otherwise refuses.",
         "input_schema": {"type": "object", "properties": {}},
@@ -62,7 +89,7 @@ TOOLS = [
 ]
 
 
-def dispatch(robot: Go2Sim, name: str, args: dict):
+def dispatch(robot: Go2Sim, name: str, args: dict, memory: AgentMemory | None = None):
     if name == "move":
         return robot.move(float(args["distance_m"]))
     if name == "turn":
@@ -75,6 +102,12 @@ def dispatch(robot: Go2Sim, name: str, args: dict):
         return robot.say(args["text"])
     if name == "recharge_at_dock":
         return robot.recharge_at_dock()
+    if name == "remember":
+        return (memory or AgentMemory()).remember(args["key"], args["value"])
+    if name == "recall":
+        return (memory or AgentMemory()).recall(args.get("query", ""))
+    if name == "forget":
+        return (memory or AgentMemory()).forget(args["key"])
     if name == "done":
         return {"_done": True, "summary": args["summary"]}
     return f"unknown tool: {name}"

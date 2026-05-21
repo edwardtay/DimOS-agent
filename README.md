@@ -68,6 +68,23 @@ canvas while tool calls stream in. Try:
 - Below 15% battery, route to the dock and `recharge_at_dock`.
 - Call `done` with a one-sentence summary when the goal is satisfied (or cannot be).
 
+## Tests
+
+```bash
+pip install pytest
+pytest -q tests/
+```
+
+10 unit tests cover collision, occlusion, e-stop, battery floor, posture lock,
+dock-proximity recharge, and memory round-tripping.
+
+## Docker
+
+```bash
+docker build -t dimos-agent .
+docker run --rm -p 8000:8000 -e ANTHROPIC_API_KEY=sk-ant-... dimos-agent
+```
+
 ## License
 
 MIT

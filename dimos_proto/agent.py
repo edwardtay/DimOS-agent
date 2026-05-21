@@ -9,6 +9,7 @@ from typing import Iterator
 from anthropic import Anthropic
 
 from .go2_sim import Go2Sim
+from .memory import AgentMemory
 from .tools import TOOLS, dispatch
 
 MODEL = os.environ.get("DIMOS_MODEL", "claude-sonnet-4-6")
@@ -34,6 +35,10 @@ calling tools against the robot. Rules:
 - If `emergency_stop` is true in a perception, do not attempt to move; call
   `done` and explain.
 - If battery drops below 15%, route to the dock and `recharge_at_dock`.
+- You have persistent memory across missions: `remember(key, value)` to save
+  discoveries (e.g. an object's last-known position), `recall(query)` to
+  retrieve them. At the start of a mission, prior memories are injected for
+  you; use them to skip rediscovery, but verify before trusting old positions.
 - When the goal is satisfied (or cannot be), call `done` with a one-sentence
   summary including any failure reason.
 - Keep reasoning text terse. Operators care about actions, not narration.
@@ -44,6 +49,7 @@ def run(
     goal: str,
     robot: Go2Sim | None = None,
     cancel: threading.Event | None = None,
+    memory: AgentMemory | None = None,
 ) -> Iterator[str]:
     """Yield human-readable trace lines while executing `goal`.
 
@@ -51,10 +57,18 @@ def run(
     """
     robot = robot or Go2Sim()
     cancel = cancel or threading.Event()
+    memory = memory or AgentMemory()
     client = Anthropic()
 
-    messages: list[dict] = [{"role": "user", "content": goal}]
+    prior = memory.all()
+    preamble = ""
+    if prior:
+        preamble = ("Prior memory (verify before relying on positional facts):\n"
+                    + "\n".join(f"  {k} = {v}" for k, v in prior.items()) + "\n\n")
+    messages: list[dict] = [{"role": "user", "content": preamble + "Goal: " + goal}]
     yield f"GOAL: {goal}"
+    if prior:
+        yield f"  memory: loaded {len(prior)} fact(s)"
 
     in_tok = out_tok = 0
 
@@ -99,7 +113,7 @@ def run(
             if cancel.is_set():
                 yield "CANCELLED by operator."
                 return
-            result = dispatch(robot, block.name, block.input)
+            result = dispatch(robot, block.name, block.input, memory)
             yield f"  -> {block.name}({_fmt_args(block.input)}) = {_fmt_result(result)}"
             if isinstance(result, dict) and result.get("_done"):
                 finished = True

@@ -17,9 +17,11 @@ from pydantic import BaseModel
 
 from .agent import run as agent_run
 from .go2_sim import Go2Sim
+from .memory import AgentMemory
 
 app = FastAPI()
 ROBOT = Go2Sim()
+MEMORY = AgentMemory()
 LOCK = threading.Lock()
 CANCEL = threading.Event()
 
@@ -88,6 +90,18 @@ def place(body: PlaceBody) -> dict:
     return {"ok": True}
 
 
+@app.get("/memory")
+def memory_view() -> JSONResponse:
+    return JSONResponse(MEMORY.all())
+
+
+@app.post("/memory/clear")
+def memory_clear() -> dict:
+    for k in list(MEMORY.all().keys()):
+        MEMORY.forget(k)
+    return {"ok": True}
+
+
 @app.get("/run")
 def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
     if api_key:
@@ -98,7 +112,7 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
 
     def worker() -> None:
         try:
-            for line in agent_run(goal, ROBOT, CANCEL):
+            for line in agent_run(goal, ROBOT, CANCEL, MEMORY):
                 q.put(line)
         except Exception as e:
             q.put(f"ERROR: {type(e).__name__}: {e}")
@@ -177,7 +191,21 @@ INDEX_HTML = r"""<!doctype html>
  .t-cancel { color:var(--danger); font-weight:600; }
  .t-usage { color:var(--muted); font-style:italic; }
  .kv { color:var(--muted); font-size:12px; }
- .examples { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+ #mic.recording { background:var(--danger); color:#fff; border-color:var(--danger);
+   animation: pulse 1s infinite; }
+ @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.5;} }
+ .queue, .memory { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
+ .queue:empty, .memory:empty { display:none; }
+ .queue .q-item, .memory .m-item {
+   display:inline-flex; align-items:center; gap:6px;
+   font-size:12px; padding:5px 4px 5px 10px; background:#fff;
+   border:1px solid var(--border); border-radius:6px; color:var(--text);
+ }
+ .queue .q-item b { color:var(--accent); }
+ .memory .m-item { background:var(--chip); border-color:transparent; color:var(--chip-text); }
+ .q-item button { padding:2px 7px; background:transparent; color:var(--muted);
+   border:none; font-size:14px; cursor:pointer; }
+ .examples { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
  .examples span { font-size:12px; padding:5px 10px; background:var(--chip);
    border-radius:999px; cursor:pointer; color:var(--chip-text); }
  .examples span:hover { background:var(--chip-hover); }
@@ -219,15 +247,20 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="row" style="margin-top:8px;">
         <input id="goal" type="text" placeholder='e.g. "find alice and say hello"' />
+        <button id="mic" class="secondary" title="voice input">🎤</button>
+        <button id="queue-add" class="secondary" title="add to queue">+</button>
         <button id="go">Run</button>
       </div>
       <div class="row" style="margin-top:8px;">
         <button id="cancel" class="danger" disabled>Cancel mission</button>
         <button id="reset" class="secondary">Reset world</button>
+        <button id="forget" class="secondary" title="clear agent memory">forget all</button>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">
           <input type="checkbox" id="tts" checked> speech
         </label>
       </div>
+      <div id="queue" class="queue"></div>
+      <div id="memory" class="memory"></div>
       <div class="examples">
         <span>find alice and say hello</span>
         <span>look around and report what you see</span>
@@ -399,6 +432,11 @@ function addLine(text) {
   trace.appendChild(div);
   trace.scrollTop = trace.scrollHeight;
 
+  if (text.startsWith('DONE:') || text.startsWith('CANCELLED') || text.startsWith('ERROR')) {
+    if (typeof refreshMemory === 'function') refreshMemory();
+    if (typeof autoAdvance === 'function') setTimeout(autoAdvance, 400);
+  }
+
   // TTS for `say` tool calls
   const ttsOn = document.getElementById('tts').checked;
   if (ttsOn && text.includes('-> say(text=')) {
@@ -444,6 +482,86 @@ document.querySelectorAll('.examples span').forEach(el => {
 document.getElementById('goal').addEventListener('keydown', e => {
   if (e.key === 'Enter') goBtn.click();
 });
+
+// --- mission queue ---
+const queueEl = document.getElementById('queue');
+const queue = [];
+function renderQueue() {
+  queueEl.innerHTML = '';
+  queue.forEach((g, i) => {
+    const div = document.createElement('div'); div.className = 'q-item';
+    div.innerHTML = `<span><b>${i+1}.</b> ${escapeHtml(g)}</span>`;
+    const x = document.createElement('button'); x.textContent = '×';
+    x.onclick = () => { queue.splice(i,1); renderQueue(); };
+    div.appendChild(x); queueEl.appendChild(div);
+  });
+}
+function escapeHtml(s) { return s.replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+document.getElementById('queue-add').onclick = () => {
+  const g = document.getElementById('goal').value.trim();
+  if (!g) return;
+  queue.push(g);
+  document.getElementById('goal').value = '';
+  renderQueue();
+};
+
+// --- voice input ---
+const micBtn = document.getElementById('mic');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { micBtn.disabled = true; micBtn.title = 'speech recognition unsupported'; }
+else {
+  const rec = new SR();
+  rec.lang = 'en-US'; rec.interimResults = false;
+  let recording = false;
+  micBtn.onclick = () => {
+    if (recording) { rec.stop(); return; }
+    try { rec.start(); recording = true; micBtn.classList.add('recording'); }
+    catch(e) {}
+  };
+  rec.onresult = (e) => {
+    const text = e.results[0][0].transcript;
+    document.getElementById('goal').value = text;
+    setTimeout(() => goBtn.click(), 80);
+  };
+  rec.onend = () => { recording = false; micBtn.classList.remove('recording'); };
+  rec.onerror = () => { recording = false; micBtn.classList.remove('recording'); };
+}
+
+// --- memory display + clear ---
+async function refreshMemory() {
+  try {
+    const r = await fetch('/memory'); const m = await r.json();
+    const el = document.getElementById('memory'); el.innerHTML = '';
+    for (const [k,v] of Object.entries(m)) {
+      const d = document.createElement('div'); d.className = 'm-item';
+      d.textContent = `${k}: ${v}`;
+      el.appendChild(d);
+    }
+  } catch(e) {}
+}
+setInterval(refreshMemory, 1500); refreshMemory();
+document.getElementById('forget').onclick = async () => {
+  await fetch('/memory/clear', {method:'POST'}); refreshMemory();
+};
+
+// --- wrap Run to auto-advance queue ---
+const _origGo = goBtn.onclick;
+goBtn.onclick = function() {
+  const goal = document.getElementById('goal').value.trim();
+  if (!goal && queue.length) {
+    document.getElementById('goal').value = queue.shift();
+    renderQueue();
+  }
+  _origGo.call(this);
+};
+function autoAdvance() {
+  if (queue.length && !goBtn.disabled) {
+    document.getElementById('goal').value = queue.shift();
+    renderQueue();
+    setTimeout(() => goBtn.click(), 600);
+  }
+}
 </script>
 </body></html>
 """
