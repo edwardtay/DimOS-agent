@@ -1,9 +1,7 @@
 """Localhost demo for the DimOS prototype.
 
 Run:  python -m dimos_proto.server
-Open: http://localhost:8000
-
-Streams agent steps via SSE and renders the Go2 + world on an HTML canvas.
+Open: http://127.0.0.1:8000
 """
 from __future__ import annotations
 
@@ -13,8 +11,9 @@ import queue
 import threading
 from typing import Iterator
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .agent import run as agent_run
 from .go2_sim import Go2Sim
@@ -22,6 +21,7 @@ from .go2_sim import Go2Sim
 app = FastAPI()
 ROBOT = Go2Sim()
 LOCK = threading.Lock()
+CANCEL = threading.Event()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -36,8 +36,13 @@ def state() -> JSONResponse:
             "pose": {"x": ROBOT.x, "y": ROBOT.y, "heading_deg": ROBOT.heading_deg},
             "battery": ROBOT.battery,
             "posture": ROBOT.posture,
+            "emergency_stop": ROBOT.emergency_stop,
             "world": [{"name": o.name, "tag": o.tag, "x": o.x, "y": o.y}
                       for o in ROBOT.world],
+            "obstacles": [
+                {"x1": p[0], "y1": p[1], "x2": q[0], "y2": q[1]}
+                for (p, q) in ROBOT.obstacles
+            ],
             "log_tail": ROBOT.log[-12:],
         })
 
@@ -47,6 +52,39 @@ def reset() -> dict:
     global ROBOT
     with LOCK:
         ROBOT = Go2Sim()
+    CANCEL.clear()
+    return {"ok": True}
+
+
+class EStopBody(BaseModel):
+    active: bool
+
+
+@app.post("/estop")
+def estop(body: EStopBody) -> dict:
+    with LOCK:
+        ROBOT.set_emergency_stop(body.active)
+    if body.active:
+        CANCEL.set()
+    return {"emergency_stop": ROBOT.emergency_stop}
+
+
+@app.post("/cancel")
+def cancel() -> dict:
+    CANCEL.set()
+    return {"cancelled": True}
+
+
+class PlaceBody(BaseModel):
+    name: str
+    x: float
+    y: float
+
+
+@app.post("/place")
+def place(body: PlaceBody) -> dict:
+    with LOCK:
+        ROBOT.place_object(body.name, body.x, body.y)
     return {"ok": True}
 
 
@@ -55,13 +93,14 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
     if api_key:
         os.environ["ANTHROPIC_API_KEY"] = api_key
 
+    CANCEL.clear()
     q: queue.Queue[str | None] = queue.Queue()
 
     def worker() -> None:
         try:
-            for line in agent_run(goal, ROBOT):
+            for line in agent_run(goal, ROBOT, CANCEL):
                 q.put(line)
-        except Exception as e:  # surface errors to the client
+        except Exception as e:
             q.put(f"ERROR: {type(e).__name__}: {e}")
         finally:
             q.put(None)
@@ -74,40 +113,48 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
             if item is None:
                 yield b"event: end\ndata: {}\n\n"
                 return
-            payload = json.dumps({"line": item})
-            yield f"data: {payload}\n\n".encode()
+            yield f"data: {json.dumps({'line': item})}\n\n".encode()
 
     return StreamingResponse(sse(), media_type="text/event-stream")
 
 
 INDEX_HTML = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>DimOS Prototype</title>
+<html><head><meta charset="utf-8"><title>DimOS · Go2 Operator Console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <style>
  :root {
    color-scheme: light;
    --bg:#ffffff; --panel:#f7f8fa; --grid:#eef0f3; --grid-strong:#dde1e7;
-   --border:#e3e6eb; --text:#1a1f29; --muted:#6b7480;
+   --wall:#3a4a63; --border:#e3e6eb; --text:#1a1f29; --muted:#6b7480;
    --accent:#2a6df4; --accent-soft:rgba(42,109,244,0.10);
-   --goal:#2a6df4; --think:#6b7480; --tool:#1f8a4c; --done:#b4791a; --err:#c43030;
+   --danger:#c43030; --danger-soft:#fdecec;
+   --warn:#b4791a; --good:#1f8a4c;
    --chip:#eef2f8; --chip-hover:#dde6f5; --chip-text:#3a4a63;
  }
  * { box-sizing: border-box; }
  html, body { height: 100%; }
  body { margin:0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
    background:var(--bg); color:var(--text); -webkit-text-size-adjust:100%; }
- header { padding:14px 18px; border-bottom:1px solid var(--border);
+ header { padding:12px 18px; border-bottom:1px solid var(--border);
    display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
  header h1 { font-size:14px; margin:0; letter-spacing:.04em; font-weight:600; }
- main { display:grid; grid-template-columns: 460px 1fr; gap:0; height: calc(100dvh - 53px); }
+ .badge { font-size:11px; color:var(--muted); padding:3px 8px;
+   background:var(--chip); border-radius:999px; }
+ .estop { margin-left:auto; padding:8px 14px; background:var(--danger);
+   color:#fff; border:none; border-radius:8px; cursor:pointer; font-weight:600;
+   letter-spacing:.05em; font-size:12px; font-family:inherit; }
+ .estop.active { background:#fff; color:var(--danger); border:2px solid var(--danger); }
+ main { display:grid; grid-template-columns: 460px 1fr; gap:0;
+   height: calc(100dvh - 53px); }
  #left { border-right:1px solid var(--border); display:flex; flex-direction:column;
    background:var(--panel); min-height:0; }
  #right { position:relative; background:var(--bg); min-height:0; }
- canvas { background:var(--bg); display:block; width:100%; height:100%; }
- .panel { padding:14px 16px; border-top:1px solid var(--border); background:var(--panel); }
+ canvas { display:block; width:100%; height:100%; touch-action:none; cursor:grab; }
+ canvas.dragging { cursor:grabbing; }
+ .panel { padding:12px 16px; border-top:1px solid var(--border); background:var(--panel); }
  .panel:first-child { border-top:none; }
- .row { display:flex; gap:8px; }
+ .row { display:flex; gap:8px; align-items:center; }
  input[type=text], input[type=password] {
    flex:1; min-width:0; padding:10px 12px; background:#fff; border:1px solid var(--border);
    color:var(--text); border-radius:8px; font: inherit; font-size:14px;
@@ -116,58 +163,76 @@ INDEX_HTML = r"""<!doctype html>
  button { padding:10px 14px; background:var(--accent); color:#fff; border:none;
    border-radius:8px; cursor:pointer; font: inherit; font-size:14px; white-space:nowrap; }
  button.secondary { background:#fff; color:var(--text); border:1px solid var(--border); }
+ button.danger { background:var(--danger-soft); color:var(--danger);
+   border:1px solid var(--danger); }
  button:disabled { opacity:.55; cursor:wait; }
  #trace { flex:1; overflow:auto; padding:12px 16px; font-size:12.5px;
    line-height:1.55; white-space:pre-wrap; background:#fff;
    -webkit-overflow-scrolling: touch; }
- .t-goal { color:var(--goal); font-weight:600; }
- .t-think { color:var(--think); }
- .t-tool { color:var(--tool); }
- .t-done { color:var(--done); font-weight:600; }
- .t-err  { color:var(--err); }
+ .t-goal { color:var(--accent); font-weight:600; }
+ .t-think { color:var(--muted); }
+ .t-tool { color:var(--good); }
+ .t-done { color:var(--warn); font-weight:600; }
+ .t-err  { color:var(--danger); }
+ .t-cancel { color:var(--danger); font-weight:600; }
+ .t-usage { color:var(--muted); font-style:italic; }
  .kv { color:var(--muted); font-size:12px; }
  .examples { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
  .examples span { font-size:12px; padding:5px 10px; background:var(--chip);
    border-radius:999px; cursor:pointer; color:var(--chip-text); }
  .examples span:hover { background:var(--chip-hover); }
  #hud { position:absolute; top:10px; left:14px; right:14px;
-   font-size:12px; color:var(--muted); pointer-events:none; }
+   font-size:12px; color:var(--muted); pointer-events:none;
+   display:flex; gap:14px; flex-wrap:wrap; }
+ #hud b { color:var(--text); font-weight:500; }
+ #hud .bat-low { color:var(--danger); }
+ .estop-banner { position:absolute; left:50%; top:14px; transform:translateX(-50%);
+   background:var(--danger); color:#fff; padding:6px 14px; border-radius:999px;
+   font-size:12px; font-weight:600; letter-spacing:.05em; display:none; }
+ .estop-banner.on { display:block; }
 
- @media (max-width: 800px) {
-   header h1 + .kv { display:none; }
-   main { grid-template-columns: 1fr; grid-template-rows: 44vh 1fr; height: calc(100dvh - 53px); }
+ @media (max-width: 820px) {
+   header .badge { display:none; }
+   main { grid-template-columns: 1fr; grid-template-rows: 46vh 1fr;
+     height: calc(100dvh - 53px); }
    #left { border-right:none; border-top:1px solid var(--border); order:2; }
    #right { order:1; border-bottom:1px solid var(--border); }
-   #trace { font-size:12px; padding:10px 14px; }
    .panel { padding:12px 14px; }
    .row { flex-wrap:wrap; }
    .row > input { flex: 1 1 100%; }
    .row > button { flex: 1 1 auto; }
-   .examples span { font-size:12.5px; padding:6px 11px; }
-   input, button { font-size:16px; }  /* avoid iOS zoom */
+   input, button { font-size:16px; }
  }
 </style></head>
 <body>
 <header>
-  <h1>DIMOS · GO2 PROTOTYPE</h1>
-  <span class="kv">localhost simulator · Claude agent loop</span>
+  <h1>DIMOS · GO2 OPERATOR CONSOLE</h1>
+  <span class="badge">localhost simulator</span>
+  <span class="badge">Claude tool-use loop</span>
+  <button class="estop" id="estop">EMERGENCY STOP</button>
 </header>
 <main>
   <div id="left">
     <div class="panel">
       <div class="row">
-        <input id="key" type="password" placeholder="ANTHROPIC_API_KEY (kept in this tab only)" />
+        <input id="key" type="password" placeholder="ANTHROPIC_API_KEY (this tab only)" />
       </div>
       <div class="row" style="margin-top:8px;">
         <input id="goal" type="text" placeholder='e.g. "find alice and say hello"' />
         <button id="go">Run</button>
-        <button id="reset" class="secondary">Reset</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="cancel" class="danger" disabled>Cancel mission</button>
+        <button id="reset" class="secondary">Reset world</button>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="tts" checked> speech
+        </label>
       </div>
       <div class="examples">
         <span>find alice and say hello</span>
         <span>look around and report what you see</span>
-        <span>walk to the red ball</span>
-        <span>sit down then stand back up</span>
+        <span>walk to the red ball without hitting walls</span>
+        <span>battery low — return to the dock and recharge</span>
       </div>
     </div>
     <div id="trace"></div>
@@ -175,6 +240,7 @@ INDEX_HTML = r"""<!doctype html>
   <div id="right">
     <canvas id="map"></canvas>
     <div id="hud"></div>
+    <div id="banner" class="estop-banner">EMERGENCY STOP ACTIVE</div>
   </div>
 </main>
 <script>
@@ -182,7 +248,19 @@ const cvs = document.getElementById('map');
 const ctx = cvs.getContext('2d');
 const trace = document.getElementById('trace');
 const hud = document.getElementById('hud');
+const banner = document.getElementById('banner');
 let state = null;
+let drag = null;
+
+function viewMetrics() {
+  const W = cvs.width / devicePixelRatio, H = cvs.height / devicePixelRatio;
+  const scale = Math.max(28, Math.min(70, Math.min(W, H) / 11));
+  return { W, H, scale, cx: W/2, cy: H/2 };
+}
+function worldFromScreen(sx, sy) {
+  const m = viewMetrics();
+  return { x: (sx - m.cx) / m.scale, y: -(sy - m.cy) / m.scale };
+}
 
 function fitCanvas() {
   const r = cvs.getBoundingClientRect();
@@ -194,34 +272,42 @@ window.addEventListener('resize', () => { fitCanvas(); draw(); });
 
 function draw() {
   if (!state) return;
-  const W = cvs.width / devicePixelRatio, H = cvs.height / devicePixelRatio;
+  const m = viewMetrics();
+  const { W, H, scale, cx, cy } = m;
   ctx.clearRect(0,0,W,H);
-  const css = getComputedStyle(document.documentElement);
-  const cGrid = css.getPropertyValue('--grid').trim() || '#eef0f3';
-  const cGridStrong = css.getPropertyValue('--grid-strong').trim() || '#dde1e7';
-  const cAccent = css.getPropertyValue('--accent').trim() || '#2a6df4';
-  const cText = css.getPropertyValue('--text').trim() || '#1a1f29';
 
-  // scale so map fits viewport on mobile too
-  const scale = Math.max(28, Math.min(70, Math.min(W, H) / 14));
-  const cx = W/2, cy = H/2;
-  ctx.strokeStyle = cGrid; ctx.lineWidth = 1;
-  for (let i=-12;i<=12;i++){
+  // grid
+  ctx.strokeStyle = getCss('--grid'); ctx.lineWidth = 1;
+  for (let i=-14;i<=14;i++){
     ctx.beginPath(); ctx.moveTo(cx+i*scale,0); ctx.lineTo(cx+i*scale,H); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0,cy-i*scale); ctx.lineTo(W,cy-i*scale); ctx.stroke();
   }
-  ctx.strokeStyle = cGridStrong;
+  ctx.strokeStyle = getCss('--grid-strong');
   ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,H); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(0,cy); ctx.lineTo(W,cy); ctx.stroke();
 
+  // walls
+  ctx.strokeStyle = getCss('--wall'); ctx.lineWidth = 4; ctx.lineCap = 'round';
+  for (const w of state.obstacles) {
+    ctx.beginPath();
+    ctx.moveTo(cx + w.x1*scale, cy - w.y1*scale);
+    ctx.lineTo(cx + w.x2*scale, cy - w.y2*scale);
+    ctx.stroke();
+  }
+
   // world objects
-  const tagColor = { person:'#2a6df4', ball:'#d93636', chair:'#c98a14' };
+  const tagColor = { person:'#2a6df4', ball:'#d93636', chair:'#c98a14', dock:'#1f8a4c' };
   for (const o of state.world) {
     const px = cx + o.x*scale, py = cy - o.y*scale;
-    ctx.fillStyle = tagColor[o.tag] || '#888';
-    ctx.beginPath(); ctx.arc(px,py,7,0,Math.PI*2); ctx.fill();
-    ctx.fillStyle = cText; ctx.font = '12px ui-monospace';
-    ctx.fillText(o.name, px+11, py+4);
+    if (o.tag === 'dock') {
+      ctx.strokeStyle = tagColor[o.tag]; ctx.lineWidth = 2;
+      ctx.strokeRect(px-12, py-12, 24, 24);
+    } else {
+      ctx.fillStyle = tagColor[o.tag] || '#888';
+      ctx.beginPath(); ctx.arc(px,py,8,0,Math.PI*2); ctx.fill();
+    }
+    ctx.fillStyle = getCss('--text'); ctx.font = '12px ui-monospace';
+    ctx.fillText(o.name, px+12, py+4);
   }
 
   // robot
@@ -232,23 +318,68 @@ function draw() {
   ctx.moveTo(rx,ry);
   ctx.arc(rx,ry, 5*scale, -h - Math.PI/4, -h + Math.PI/4);
   ctx.closePath(); ctx.fill();
-  ctx.fillStyle = cAccent;
+  ctx.fillStyle = state.emergency_stop ? getCss('--danger') : getCss('--accent');
   ctx.beginPath(); ctx.arc(rx,ry,10,0,Math.PI*2); ctx.fill();
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(rx,ry);
   ctx.lineTo(rx + Math.cos(-h)*18, ry + Math.sin(-h)*18); ctx.stroke();
 
-  hud.innerHTML = `pose (${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})
-    · heading ${state.pose.heading_deg.toFixed(0)}°
-    · posture ${state.posture}
-    · battery ${state.battery.toFixed(1)}%`;
+  // HUD
+  const bClass = state.battery < 15 ? 'bat-low' : '';
+  hud.innerHTML =
+    `<span>pose <b>(${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})</b></span>` +
+    `<span>heading <b>${state.pose.heading_deg.toFixed(0)}°</b></span>` +
+    `<span>posture <b>${state.posture}</b></span>` +
+    `<span class="${bClass}">battery <b>${state.battery.toFixed(1)}%</b></span>` +
+    (usage.in_tok ? `<span>tokens <b>${usage.in_tok}/${usage.out_tok}</b> · <b>$${usage.cost.toFixed(4)}</b></span>` : '');
+  banner.classList.toggle('on', !!state.emergency_stop);
 }
+function getCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+let usage = { in_tok: 0, out_tok: 0, cost: 0 };
 
 async function refresh() {
-  const r = await fetch('/state'); state = await r.json(); draw();
+  try { const r = await fetch('/state'); state = await r.json(); draw(); } catch(e) {}
 }
-setInterval(refresh, 600); refresh(); fitCanvas();
+setInterval(refresh, 500); fitCanvas(); refresh();
 
+// --- drag objects ---
+function hitObject(sx, sy) {
+  if (!state) return null;
+  const m = viewMetrics();
+  for (const o of state.world) {
+    const px = m.cx + o.x*m.scale, py = m.cy - o.y*m.scale;
+    if (Math.hypot(sx - px, sy - py) < 14) return o;
+  }
+  return null;
+}
+function evtPos(e) {
+  const r = cvs.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  return { x: p.clientX - r.left, y: p.clientY - r.top };
+}
+function onDown(e) {
+  const { x, y } = evtPos(e);
+  const o = hitObject(x, y);
+  if (o) { drag = o.name; cvs.classList.add('dragging'); e.preventDefault(); }
+}
+function onMove(e) {
+  if (!drag) return;
+  const { x, y } = evtPos(e);
+  const w = worldFromScreen(x, y);
+  fetch('/place', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({name: drag, x: w.x, y: w.y})});
+  e.preventDefault();
+}
+function onUp() { drag = null; cvs.classList.remove('dragging'); }
+cvs.addEventListener('mousedown', onDown);
+cvs.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+cvs.addEventListener('touchstart', onDown, {passive:false});
+cvs.addEventListener('touchmove', onMove, {passive:false});
+window.addEventListener('touchend', onUp);
+
+// --- trace ---
 function addLine(text) {
   const div = document.createElement('div');
   let cls = '';
@@ -256,34 +387,62 @@ function addLine(text) {
   else if (text.startsWith('  think:')) cls = 't-think';
   else if (text.startsWith('  ->')) cls = 't-tool';
   else if (text.startsWith('DONE:')) cls = 't-done';
+  else if (text.startsWith('CANCELLED')) cls = 't-cancel';
   else if (text.startsWith('ERROR')) cls = 't-err';
+  else if (text.startsWith('USAGE:')) {
+    cls = 't-usage';
+    const m = text.match(/in=(\d+)\s+out=(\d+)\s+cost=\$([\d.]+)/);
+    if (m) { usage = { in_tok:+m[1], out_tok:+m[2], cost:+m[3] }; draw(); }
+  }
   div.className = cls;
   div.textContent = text;
   trace.appendChild(div);
   trace.scrollTop = trace.scrollHeight;
+
+  // TTS for `say` tool calls
+  const ttsOn = document.getElementById('tts').checked;
+  if (ttsOn && text.includes('-> say(text=')) {
+    const m = text.match(/text=(['"])((?:\\.|(?!\1).)*)\1/);
+    if (m && 'speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance(m[2]);
+      u.rate = 1.05; window.speechSynthesis.speak(u);
+    }
+  }
 }
 
-document.getElementById('go').onclick = () => {
+const goBtn = document.getElementById('go');
+const cancelBtn = document.getElementById('cancel');
+goBtn.onclick = () => {
   const goal = document.getElementById('goal').value.trim();
   const key  = document.getElementById('key').value.trim();
   if (!goal) return;
   trace.innerHTML = '';
-  const btn = document.getElementById('go'); btn.disabled = true;
+  usage = { in_tok:0, out_tok:0, cost:0 };
+  goBtn.disabled = true; cancelBtn.disabled = false;
   const url = '/run?goal=' + encodeURIComponent(goal)
     + (key ? '&api_key=' + encodeURIComponent(key) : '');
   const es = new EventSource(url);
   es.onmessage = (e) => { const d = JSON.parse(e.data); addLine(d.line); refresh(); };
-  es.addEventListener('end', () => { es.close(); btn.disabled = false; });
-  es.onerror = () => { addLine('ERROR: stream closed'); es.close(); btn.disabled = false; };
+  es.addEventListener('end', () => { es.close(); goBtn.disabled=false; cancelBtn.disabled=true; });
+  es.onerror = () => { addLine('ERROR: stream closed'); es.close(); goBtn.disabled=false; cancelBtn.disabled=true; };
 };
+cancelBtn.onclick = () => fetch('/cancel', {method:'POST'});
 document.getElementById('reset').onclick = async () => {
-  await fetch('/reset', {method:'POST'}); trace.innerHTML=''; refresh();
+  await fetch('/reset', {method:'POST'}); trace.innerHTML=''; usage = {in_tok:0,out_tok:0,cost:0}; refresh();
+};
+const estopBtn = document.getElementById('estop');
+estopBtn.onclick = async () => {
+  const active = !state?.emergency_stop;
+  await fetch('/estop', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({active})});
+  estopBtn.classList.toggle('active', active);
+  refresh();
 };
 document.querySelectorAll('.examples span').forEach(el => {
   el.onclick = () => { document.getElementById('goal').value = el.textContent; };
 });
 document.getElementById('goal').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('go').click();
+  if (e.key === 'Enter') goBtn.click();
 });
 </script>
 </body></html>

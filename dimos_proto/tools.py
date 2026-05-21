@@ -46,6 +46,11 @@ TOOLS = [
         },
     },
     {
+        "name": "recharge_at_dock",
+        "description": "If the robot is within 0.6m of the charging dock, recharge to 100%. Otherwise refuses.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "done",
         "description": "Call when the user's request is fully satisfied. Provide a short summary.",
         "input_schema": {
@@ -68,6 +73,8 @@ def dispatch(robot: Go2Sim, name: str, args: dict):
         return robot.perceive()
     if name == "say":
         return robot.say(args["text"])
+    if name == "recharge_at_dock":
+        return robot.recharge_at_dock()
     if name == "done":
         return {"_done": True, "summary": args["summary"]}
     return f"unknown tool: {name}"

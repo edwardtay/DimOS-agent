@@ -11,6 +11,9 @@ venv/
 .env
 .env.*
 
+# Runtime artifacts
+missions.jsonl
+
 # OS / editor
 .DS_Store
 .idea/

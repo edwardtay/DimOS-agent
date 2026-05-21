@@ -37,12 +37,36 @@ canvas while tool calls stream in. Try:
 - `walk to the red ball`
 - `sit down then stand back up`
 
-## Safety rules (in the system prompt)
+## What makes it not-a-toy
+
+- **Walls + collision** — the simulator has axis-aligned wall segments; `move`
+  raycasts the path and stops short on contact, returning a `blocked by wall`
+  signal the agent must reason about.
+- **Emergency stop** — operator button + `/estop` endpoint. Sets a flag the
+  simulator honors (refuses motion, collapses to `sit`) and cancels any
+  in-flight mission mid-step.
+- **Cancellable missions** — `/cancel` and an in-loop `threading.Event` make
+  the agent abort at the next step boundary.
+- **Sensor noise** — `perceive` adds gaussian noise (~4 cm / 1.5°) to ranges
+  and bearings, and occludes anything behind a wall.
+- **Battery enforcement** — actions cost battery; below 5% the robot refuses
+  to move. There is a charging dock in the world and a `recharge_at_dock` tool.
+- **Token + cost telemetry** — every mission yields a `USAGE:` line with
+  input/output tokens and an estimated USD cost (Sonnet 4.6 pricing).
+- **Persistent log** — every event (move, blocked, refused, perceive, say,
+  estop, etc.) is appended to `missions.jsonl` with a session id and timestamp.
+- **Operator UX** — drag any world object on the canvas to reposition it;
+  click `EMERGENCY STOP` for an instant halt; toggle TTS to hear the robot
+  actually speak its `say()` calls via Web Speech.
+
+## Agent safety rules (in the system prompt)
 
 - Always `perceive` before acting if info is stale.
 - Move in small steps (≤ 1.0 m) and re-perceive frequently.
-- Never move while posture is not `stand`.
-- Call `done` with a one-sentence summary when the goal is satisfied.
+- On `blocked by wall`, turn and try a new heading — never repeat the same move.
+- Never move while posture is not `stand` or while `emergency_stop` is true.
+- Below 15% battery, route to the dock and `recharge_at_dock`.
+- Call `done` with a one-sentence summary when the goal is satisfied (or cannot be).
 
 ## License
 
