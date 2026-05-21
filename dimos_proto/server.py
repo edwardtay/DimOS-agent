@@ -82,37 +82,70 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
 
 INDEX_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><title>DimOS Prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
 <style>
- :root { color-scheme: dark; }
- body { margin:0; font-family: ui-monospace, Menlo, monospace; background:#0b0d10; color:#dbe3ea; }
- header { padding:14px 20px; border-bottom:1px solid #1f2630; display:flex; gap:14px; align-items:center; }
- header h1 { font-size:15px; margin:0; letter-spacing:.04em; }
- main { display:grid; grid-template-columns: 480px 1fr; gap:0; height: calc(100vh - 52px); }
- #left { border-right:1px solid #1f2630; display:flex; flex-direction:column; }
- canvas { background:#11151b; display:block; }
- .panel { padding:14px 18px; border-top:1px solid #1f2630; }
- .panel:first-child { border-top:none; }
- .row { display:flex; gap:10px; }
- input[type=text], input[type=password] {
-   flex:1; padding:9px 11px; background:#11151b; border:1px solid #243040;
-   color:#dbe3ea; border-radius:6px; font: inherit;
+ :root {
+   color-scheme: light;
+   --bg:#ffffff; --panel:#f7f8fa; --grid:#eef0f3; --grid-strong:#dde1e7;
+   --border:#e3e6eb; --text:#1a1f29; --muted:#6b7480;
+   --accent:#2a6df4; --accent-soft:rgba(42,109,244,0.10);
+   --goal:#2a6df4; --think:#6b7480; --tool:#1f8a4c; --done:#b4791a; --err:#c43030;
+   --chip:#eef2f8; --chip-hover:#dde6f5; --chip-text:#3a4a63;
  }
- button { padding:9px 14px; background:#2a6df4; color:white; border:none;
-   border-radius:6px; cursor:pointer; font: inherit; }
- button.secondary { background:#243040; }
- button:disabled { opacity:.5; cursor:wait; }
- #trace { flex:1; overflow:auto; padding:14px 18px; font-size:12.5px; line-height:1.55; white-space:pre-wrap; }
- .t-goal { color:#7fc7ff; }
- .t-think { color:#9aa4ad; }
- .t-tool { color:#b6f0a3; }
- .t-done { color:#ffd479; font-weight:600; }
- .t-err  { color:#ff7a7a; }
- .kv { color:#9aa4ad; font-size:12px; }
- .kv b { color:#dbe3ea; font-weight:500; }
+ * { box-sizing: border-box; }
+ html, body { height: 100%; }
+ body { margin:0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+   background:var(--bg); color:var(--text); -webkit-text-size-adjust:100%; }
+ header { padding:14px 18px; border-bottom:1px solid var(--border);
+   display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+ header h1 { font-size:14px; margin:0; letter-spacing:.04em; font-weight:600; }
+ main { display:grid; grid-template-columns: 460px 1fr; gap:0; height: calc(100dvh - 53px); }
+ #left { border-right:1px solid var(--border); display:flex; flex-direction:column;
+   background:var(--panel); min-height:0; }
+ #right { position:relative; background:var(--bg); min-height:0; }
+ canvas { background:var(--bg); display:block; width:100%; height:100%; }
+ .panel { padding:14px 16px; border-top:1px solid var(--border); background:var(--panel); }
+ .panel:first-child { border-top:none; }
+ .row { display:flex; gap:8px; }
+ input[type=text], input[type=password] {
+   flex:1; min-width:0; padding:10px 12px; background:#fff; border:1px solid var(--border);
+   color:var(--text); border-radius:8px; font: inherit; font-size:14px;
+ }
+ input:focus { outline:2px solid var(--accent-soft); border-color:var(--accent); }
+ button { padding:10px 14px; background:var(--accent); color:#fff; border:none;
+   border-radius:8px; cursor:pointer; font: inherit; font-size:14px; white-space:nowrap; }
+ button.secondary { background:#fff; color:var(--text); border:1px solid var(--border); }
+ button:disabled { opacity:.55; cursor:wait; }
+ #trace { flex:1; overflow:auto; padding:12px 16px; font-size:12.5px;
+   line-height:1.55; white-space:pre-wrap; background:#fff;
+   -webkit-overflow-scrolling: touch; }
+ .t-goal { color:var(--goal); font-weight:600; }
+ .t-think { color:var(--think); }
+ .t-tool { color:var(--tool); }
+ .t-done { color:var(--done); font-weight:600; }
+ .t-err  { color:var(--err); }
+ .kv { color:var(--muted); font-size:12px; }
  .examples { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
- .examples span { font-size:11.5px; padding:4px 9px; background:#1a2230;
-   border-radius:999px; cursor:pointer; color:#9fb3cc; }
- .examples span:hover { background:#243246; color:#fff; }
+ .examples span { font-size:12px; padding:5px 10px; background:var(--chip);
+   border-radius:999px; cursor:pointer; color:var(--chip-text); }
+ .examples span:hover { background:var(--chip-hover); }
+ #hud { position:absolute; top:10px; left:14px; right:14px;
+   font-size:12px; color:var(--muted); pointer-events:none; }
+
+ @media (max-width: 800px) {
+   header h1 + .kv { display:none; }
+   main { grid-template-columns: 1fr; grid-template-rows: 44vh 1fr; height: calc(100dvh - 53px); }
+   #left { border-right:none; border-top:1px solid var(--border); order:2; }
+   #right { order:1; border-bottom:1px solid var(--border); }
+   #trace { font-size:12px; padding:10px 14px; }
+   .panel { padding:12px 14px; }
+   .row { flex-wrap:wrap; }
+   .row > input { flex: 1 1 100%; }
+   .row > button { flex: 1 1 auto; }
+   .examples span { font-size:12.5px; padding:6px 11px; }
+   input, button { font-size:16px; }  /* avoid iOS zoom */
+ }
 </style></head>
 <body>
 <header>
@@ -139,9 +172,9 @@ INDEX_HTML = r"""<!doctype html>
     </div>
     <div id="trace"></div>
   </div>
-  <div style="position:relative;">
-    <canvas id="map" width="900" height="900"></canvas>
-    <div id="hud" style="position:absolute; top:12px; left:14px; font-size:12px; color:#9aa4ad;"></div>
+  <div id="right">
+    <canvas id="map"></canvas>
+    <div id="hud"></div>
   </div>
 </main>
 <script>
@@ -163,41 +196,44 @@ function draw() {
   if (!state) return;
   const W = cvs.width / devicePixelRatio, H = cvs.height / devicePixelRatio;
   ctx.clearRect(0,0,W,H);
-  // grid
-  const scale = 60; // px per meter
+  const css = getComputedStyle(document.documentElement);
+  const cGrid = css.getPropertyValue('--grid').trim() || '#eef0f3';
+  const cGridStrong = css.getPropertyValue('--grid-strong').trim() || '#dde1e7';
+  const cAccent = css.getPropertyValue('--accent').trim() || '#2a6df4';
+  const cText = css.getPropertyValue('--text').trim() || '#1a1f29';
+
+  // scale so map fits viewport on mobile too
+  const scale = Math.max(28, Math.min(70, Math.min(W, H) / 14));
   const cx = W/2, cy = H/2;
-  ctx.strokeStyle = '#1a2230'; ctx.lineWidth = 1;
-  for (let i=-10;i<=10;i++){
+  ctx.strokeStyle = cGrid; ctx.lineWidth = 1;
+  for (let i=-12;i<=12;i++){
     ctx.beginPath(); ctx.moveTo(cx+i*scale,0); ctx.lineTo(cx+i*scale,H); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0,cy-i*scale); ctx.lineTo(W,cy-i*scale); ctx.stroke();
   }
-  ctx.strokeStyle = '#2a3648';
+  ctx.strokeStyle = cGridStrong;
   ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,H); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(0,cy); ctx.lineTo(W,cy); ctx.stroke();
 
   // world objects
-  const tagColor = { person:'#7fc7ff', ball:'#ff7a7a', chair:'#ffd479' };
+  const tagColor = { person:'#2a6df4', ball:'#d93636', chair:'#c98a14' };
   for (const o of state.world) {
     const px = cx + o.x*scale, py = cy - o.y*scale;
-    ctx.fillStyle = tagColor[o.tag] || '#aaa';
-    ctx.beginPath(); ctx.arc(px,py,8,0,Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#dbe3ea'; ctx.font = '12px ui-monospace';
-    ctx.fillText(o.name, px+12, py+4);
+    ctx.fillStyle = tagColor[o.tag] || '#888';
+    ctx.beginPath(); ctx.arc(px,py,7,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = cText; ctx.font = '12px ui-monospace';
+    ctx.fillText(o.name, px+11, py+4);
   }
 
   // robot
   const rx = cx + state.pose.x*scale, ry = cy - state.pose.y*scale;
   const h = state.pose.heading_deg * Math.PI/180;
-  // FOV cone
-  ctx.fillStyle = 'rgba(42,109,244,0.12)';
+  ctx.fillStyle = 'rgba(42,109,244,0.14)';
   ctx.beginPath();
   ctx.moveTo(rx,ry);
   ctx.arc(rx,ry, 5*scale, -h - Math.PI/4, -h + Math.PI/4);
   ctx.closePath(); ctx.fill();
-  // body
-  ctx.fillStyle = '#2a6df4';
-  ctx.beginPath(); ctx.arc(rx,ry,11,0,Math.PI*2); ctx.fill();
-  // heading
+  ctx.fillStyle = cAccent;
+  ctx.beginPath(); ctx.arc(rx,ry,10,0,Math.PI*2); ctx.fill();
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(rx,ry);
   ctx.lineTo(rx + Math.cos(-h)*18, ry + Math.sin(-h)*18); ctx.stroke();
