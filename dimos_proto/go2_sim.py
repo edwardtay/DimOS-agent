@@ -45,9 +45,9 @@ def _point_seg_dist(px, py, x1, y1, x2, y2) -> float:
 
 @dataclass
 class Go2Sim:
-    x: float = 0.0
-    y: float = 0.0
-    heading_deg: float = 0.0
+    x: float = -3.5
+    y: float = -3.0
+    heading_deg: float = 90.0
     battery: float = 100.0
     posture: Literal["stand", "sit", "lie"] = "stand"
     emergency_stop: bool = False
@@ -56,22 +56,45 @@ class Go2Sim:
     sensor_noise_m: float = 0.04
     sensor_noise_deg: float = 1.5
 
+    # Warehouse-inspection seed world: zone A (left rear), zone B (right rear),
+    # zone C (front aisle). chair_3 is intentionally absent (missing).
+    # rogue_box is in zone B but not on the manifest (extra).
     world: list[WorldObject] = field(default_factory=lambda: [
-        WorldObject("alice", 3.0, 0.5, "person"),
-        WorldObject("red_ball", 1.5, -1.0, "ball"),
-        WorldObject("chair_1", -2.0, 2.0, "chair"),
+        WorldObject("chair_1", -3.0, 3.0, "chair"),
+        WorldObject("chair_2", -2.0, 2.5, "chair"),
+        WorldObject("red_ball", 2.0, 3.0, "ball"),
+        WorldObject("blue_ball", 3.0, 2.5, "ball"),
+        WorldObject("alice", -1.5, -3.0, "person"),
         WorldObject("dock", -4.0, -3.5, "dock"),
+        WorldObject("rogue_box", 3.0, -2.0, "ball"),  # unexpected
     ])
     obstacles: list[Wall] = field(default_factory=lambda: [
-        # Room outline (8m x 8m)
+        # Room outline (9m x 9m)
         ((-4.5, -4.5), (4.5, -4.5)),
         ((4.5, -4.5), (4.5, 4.5)),
         ((4.5, 4.5), (-4.5, 4.5)),
         ((-4.5, 4.5), (-4.5, -4.5)),
-        # Interior partial walls
-        ((1.0, 1.5), (1.0, 4.5)),
+        # Aisle divider between zones A and B
+        ((0.0, 1.5), (0.0, 4.5)),
+        # Front-of-zone shelf wall separating C from A/B
         ((-1.5, -1.0), (1.5, -1.0)),
     ])
+    zones: dict[str, tuple[float, float, float, float]] = field(default_factory=lambda: {
+        # name -> (x1, y1, x2, y2)
+        "A": (-4.5, 1.5, 0.0, 4.5),
+        "B": (0.0, 1.5, 4.5, 4.5),
+        "C": (-4.5, -4.5, 4.5, -1.0),
+    })
+    manifest: list[dict] = field(default_factory=lambda: [
+        {"name": "chair_1", "zone": "A"},
+        {"name": "chair_2", "zone": "A"},
+        {"name": "chair_3", "zone": "A"},  # intentionally missing from world
+        {"name": "red_ball", "zone": "B"},
+        {"name": "blue_ball", "zone": "B"},
+        {"name": "alice", "zone": "C"},
+        {"name": "dock", "zone": "C"},
+    ])
+    discrepancies: list[dict] = field(default_factory=list)
     log: list[dict] = field(default_factory=list)
     log_path: Path = field(default_factory=lambda: Path(
         os.environ.get("DIMOS_LOG", "missions.jsonl")))
@@ -182,6 +205,21 @@ class Go2Sim:
         self._record("posture", posture=posture)
         return f"posture set to {posture}"
 
+    def zone_of(self, x: float, y: float) -> str | None:
+        for name, (x1, y1, x2, y2) in self.zones.items():
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return name
+        return None
+
+    def report_discrepancy(self, name: str, kind: str, note: str = "") -> str:
+        entry = {
+            "ts": time.strftime("%H:%M:%S"),
+            "name": name, "kind": kind, "note": note,
+        }
+        self.discrepancies.append(entry)
+        self._record("discrepancy", **entry)
+        return f"logged {kind}: {name}" + (f" ({note})" if note else "")
+
     def perceive(self) -> dict:
         rad = math.radians(self.heading_deg)
         fx, fy = math.cos(rad), math.sin(rad)
@@ -209,10 +247,12 @@ class Go2Sim:
                 "tag": obj.tag,
                 "distance_m": round(dist + random.gauss(0, self.sensor_noise_m), 2),
                 "bearing_deg": round(bearing + random.gauss(0, self.sensor_noise_deg), 1),
+                "zone": self.zone_of(obj.x, obj.y),
             })
         result = {
             "pose": {"x": round(self.x, 2), "y": round(self.y, 2),
-                     "heading_deg": round(self.heading_deg, 1)},
+                     "heading_deg": round(self.heading_deg, 1),
+                     "zone": self.zone_of(self.x, self.y)},
             "battery": round(self.battery, 1),
             "posture": self.posture,
             "emergency_stop": self.emergency_stop,

@@ -18,9 +18,14 @@ from dimos_proto.memory import AgentMemory
 def robot(tmp_path: Path) -> Go2Sim:
     r = Go2Sim()
     r.log_path = tmp_path / "missions.jsonl"
-    # deterministic perception for tests
     r.sensor_noise_m = 0.0
     r.sensor_noise_deg = 0.0
+    # normalize to origin facing +x for legacy motion/perception tests
+    r.x, r.y, r.heading_deg = 0.0, 0.0, 0.0
+    # ensure alice is in front of the robot for perception test
+    for o in r.world:
+        if o.name == "alice":
+            o.x, o.y = 3.0, 0.5
     return r
 
 
@@ -70,11 +75,9 @@ def test_perceive_sees_alice_forward(robot: Go2Sim) -> None:
 
 
 def test_perceive_occluded_by_wall(robot: Go2Sim) -> None:
-    # Put a target behind a wall. The partial wall at x=1.0 from y=1.5..4.5
-    # occludes (1.5, 3.0) from the origin facing +x with heading 0... actually
-    # bearing to (1.5,3.0) is ~63deg which is outside 45deg FOV. Aim there.
-    robot.world.append(WorldObject("hidden", 1.5, 3.0, "ball"))
-    robot.turn(63)  # aim toward hidden
+    # Wall at y=-1 from x=-1.5 to x=1.5 occludes anything beyond it from origin.
+    robot.world.append(WorldObject("hidden", 0.0, -3.0, "ball"))
+    robot.turn(-90)  # face -y
     visible = {o["name"] for o in robot.perceive()["visible"]}
     assert "hidden" not in visible
 
@@ -88,6 +91,33 @@ def test_recharge_requires_dock_proximity(robot: Go2Sim) -> None:
     robot.battery = 20.0
     out = robot.recharge_at_dock()
     assert robot.battery == 100.0
+
+
+def test_zone_assignment(robot: Go2Sim) -> None:
+    assert robot.zone_of(-3.0, 3.0) == "A"
+    assert robot.zone_of(2.0, 3.0) == "B"
+    assert robot.zone_of(0.0, -3.0) == "C"
+    assert robot.zone_of(10.0, 10.0) is None
+
+
+def test_perceive_includes_zone(robot: Go2Sim) -> None:
+    seen = {o["name"]: o["zone"] for o in robot.perceive()["visible"]}
+    for name, zone in seen.items():
+        assert zone in ("A", "B", "C", None)
+
+
+def test_report_discrepancy_logs(robot: Go2Sim) -> None:
+    out = robot.report_discrepancy("chair_3", "missing", "expected in zone A")
+    assert "missing" in out
+    assert robot.discrepancies[0]["name"] == "chair_3"
+    assert robot.discrepancies[0]["kind"] == "missing"
+
+
+def test_seed_world_has_known_gap(robot: Go2Sim) -> None:
+    names_in_world = {o.name for o in robot.world}
+    manifest_names = {m["name"] for m in robot.manifest}
+    assert "chair_3" in manifest_names and "chair_3" not in names_in_world
+    assert "rogue_box" in names_in_world and "rogue_box" not in manifest_names
 
 
 def test_memory_roundtrip(tmp_path: Path) -> None:

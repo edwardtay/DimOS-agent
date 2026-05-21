@@ -45,6 +45,12 @@ def state() -> JSONResponse:
                 {"x1": p[0], "y1": p[1], "x2": q[0], "y2": q[1]}
                 for (p, q) in ROBOT.obstacles
             ],
+            "zones": [
+                {"name": z, "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                for z, (x1, y1, x2, y2) in ROBOT.zones.items()
+            ],
+            "manifest": ROBOT.manifest,
+            "discrepancies": ROBOT.discrepancies,
             "log_tail": ROBOT.log[-12:],
         })
 
@@ -87,6 +93,25 @@ class PlaceBody(BaseModel):
 def place(body: PlaceBody) -> dict:
     with LOCK:
         ROBOT.place_object(body.name, body.x, body.y)
+    return {"ok": True}
+
+
+class ManifestBody(BaseModel):
+    manifest: list[dict]
+
+
+@app.post("/manifest")
+def set_manifest(body: ManifestBody) -> dict:
+    with LOCK:
+        ROBOT.manifest = body.manifest
+        ROBOT.discrepancies.clear()
+    return {"ok": True, "count": len(ROBOT.manifest)}
+
+
+@app.post("/discrepancies/clear")
+def clear_discrepancies() -> dict:
+    with LOCK:
+        ROBOT.discrepancies.clear()
     return {"ok": True}
 
 
@@ -194,15 +219,23 @@ INDEX_HTML = r"""<!doctype html>
  #mic.recording { background:var(--danger); color:#fff; border-color:var(--danger);
    animation: pulse 1s infinite; }
  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.5;} }
- .queue, .memory { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
- .queue:empty, .memory:empty { display:none; }
- .queue .q-item, .memory .m-item {
+ .queue, .memory, .discrepancies { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
+ .queue:empty, .memory:empty, .discrepancies:empty { display:none; }
+ .queue .q-item, .memory .m-item, .discrepancies .d-item {
    display:inline-flex; align-items:center; gap:6px;
    font-size:12px; padding:5px 4px 5px 10px; background:#fff;
    border:1px solid var(--border); border-radius:6px; color:var(--text);
  }
  .queue .q-item b { color:var(--accent); }
  .memory .m-item { background:var(--chip); border-color:transparent; color:var(--chip-text); }
+ .discrepancies .d-item { background:#fdecec; border-color:#f3c5c5; color:var(--danger); font-weight:500; }
+ .discrepancies .d-item.kind-extra { background:#fff5e0; border-color:#f0d28a; color:#8a5a14; }
+ .discrepancies .d-item.kind-wrong_zone { background:#fff5e0; border-color:#f0d28a; color:#8a5a14; }
+ .manifest-block { margin-top:10px; font-size:12px; color:var(--muted); }
+ .manifest-block summary { cursor:pointer; padding:4px 0; user-select:none; }
+ .manifest-block textarea { width:100%; margin-top:6px; padding:8px; border-radius:6px;
+   border:1px solid var(--border); font: 12px ui-monospace; background:#fff; color:var(--text);
+   resize:vertical; min-height:90px; }
  .q-item button { padding:2px 7px; background:transparent; color:var(--muted);
    border:none; font-size:14px; cursor:pointer; }
  .examples { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
@@ -260,11 +293,20 @@ INDEX_HTML = r"""<!doctype html>
         </label>
       </div>
       <div id="queue" class="queue"></div>
+      <div id="discrepancies" class="discrepancies"></div>
       <div id="memory" class="memory"></div>
+      <details class="manifest-block">
+        <summary>Manifest (<span id="manifest-count">0</span> items)</summary>
+        <textarea id="manifest" spellcheck="false" rows="6"></textarea>
+        <div class="row" style="margin-top:6px;">
+          <button id="manifest-save" class="secondary">Save manifest</button>
+          <button id="discrepancies-clear" class="secondary">Clear discrepancies</button>
+        </div>
+      </details>
       <div class="examples">
+        <span>walk the patrol route and report any manifest discrepancies</span>
+        <span>visit zone A, B, and C and tell me what you see in each</span>
         <span>find alice and say hello</span>
-        <span>look around and report what you see</span>
-        <span>walk to the red ball without hitting walls</span>
         <span>battery low — return to the dock and recharge</span>
       </div>
     </div>
@@ -308,6 +350,20 @@ function draw() {
   const m = viewMetrics();
   const { W, H, scale, cx, cy } = m;
   ctx.clearRect(0,0,W,H);
+
+  // zones (filled tinted rectangles)
+  const zoneColors = { A:'rgba(42,109,244,0.06)', B:'rgba(31,138,76,0.07)', C:'rgba(180,121,26,0.06)' };
+  ctx.font = '13px ui-monospace';
+  for (const z of (state.zones || [])) {
+    const x = cx + z.x1*scale, y = cy - z.y2*scale;
+    const w = (z.x2 - z.x1)*scale, h = (z.y2 - z.y1)*scale;
+    ctx.fillStyle = zoneColors[z.name] || 'rgba(100,100,100,0.05)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(60,80,110,0.18)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(60,80,110,0.55)';
+    ctx.fillText('zone ' + z.name, x + 8, y + 18);
+  }
 
   // grid
   ctx.strokeStyle = getCss('--grid'); ctx.lineWidth = 1;
@@ -543,6 +599,43 @@ async function refreshMemory() {
 setInterval(refreshMemory, 1500); refreshMemory();
 document.getElementById('forget').onclick = async () => {
   await fetch('/memory/clear', {method:'POST'}); refreshMemory();
+};
+
+// --- manifest + discrepancies ---
+const manifestEl = document.getElementById('manifest');
+const manifestCount = document.getElementById('manifest-count');
+const discEl = document.getElementById('discrepancies');
+let manifestDirty = false;
+manifestEl.addEventListener('input', () => { manifestDirty = true; });
+function renderManifest() {
+  if (!state || manifestDirty) return;
+  manifestEl.value = JSON.stringify(state.manifest || [], null, 2);
+  manifestCount.textContent = (state.manifest || []).length;
+}
+function renderDiscrepancies() {
+  if (!state) return;
+  discEl.innerHTML = '';
+  for (const d of (state.discrepancies || [])) {
+    const div = document.createElement('div');
+    div.className = 'd-item kind-' + d.kind;
+    div.textContent = `${d.kind.toUpperCase()}: ${d.name}` + (d.note ? ` — ${d.note}` : '');
+    discEl.appendChild(div);
+  }
+}
+const _draw = draw;
+draw = function() { _draw(); renderManifest(); renderDiscrepancies(); };
+
+document.getElementById('manifest-save').onclick = async () => {
+  try {
+    const parsed = JSON.parse(manifestEl.value);
+    await fetch('/manifest', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({manifest: parsed})});
+    manifestDirty = false;
+    refresh();
+  } catch(e) { alert('Manifest JSON parse error: ' + e.message); }
+};
+document.getElementById('discrepancies-clear').onclick = async () => {
+  await fetch('/discrepancies/clear', {method:'POST'}); refresh();
 };
 
 // --- wrap Run to auto-advance queue ---

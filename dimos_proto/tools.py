@@ -73,6 +73,23 @@ TOOLS = [
         },
     },
     {
+        "name": "report_discrepancy",
+        "description": (
+            "Flag a manifest mismatch found during an inspection. "
+            "kind='missing' (expected but not seen), 'extra' (seen but not on manifest), "
+            "or 'wrong_zone' (seen but in the wrong zone)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "kind": {"type": "string", "enum": ["missing", "extra", "wrong_zone"]},
+                "note": {"type": "string"},
+            },
+            "required": ["name", "kind"],
+        },
+    },
+    {
         "name": "recharge_at_dock",
         "description": "If the robot is within 0.6m of the charging dock, recharge to 100%. Otherwise refuses.",
         "input_schema": {"type": "object", "properties": {}},
@@ -102,6 +119,9 @@ def dispatch(robot: Go2Sim, name: str, args: dict, memory: AgentMemory | None = 
         return robot.say(args["text"])
     if name == "recharge_at_dock":
         return robot.recharge_at_dock()
+    if name == "report_discrepancy":
+        return robot.report_discrepancy(
+            args["name"], args["kind"], args.get("note", ""))
     if name == "remember":
         return (memory or AgentMemory()).remember(args["key"], args["value"])
     if name == "recall":

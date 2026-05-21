@@ -1,9 +1,25 @@
 # DimOS-Agent
 
-Claude-driven agent prototype for the [DIMENSIONAL (DimOS) Robot Hackathon](https://luma.com/vprodwg0).
-Turns a Unitree Go2 into a natural-language field assistant: you give it a goal in
-plain English, and a tool-use loop drives `perceive` → `move`/`turn`/`say` → `done`
-against either a local simulator or (swap one file) the real DimOS SDK.
+Claude-driven warehouse-inspection agent for the
+[DIMENSIONAL (DimOS) Robot Hackathon](https://luma.com/vprodwg0).
+A Unitree Go2 walks a multi-zone floor, perceives what's actually there,
+compares it against a manifest, and reports missing/extra items — all via a
+natural-language operator console. The agent loop drives
+`perceive` → `move`/`turn`/`say`/`report_discrepancy` → `done` against either
+the local simulator or (swap one file) the real DimOS SDK.
+
+## Demo arc (90 seconds)
+
+1. Operator opens the console; three zones (A, B, C) and a seeded manifest are
+   already loaded.
+2. Operator says (voice) *"walk the patrol route and report any manifest
+   discrepancies."*
+3. Agent recalls last-seen positions from memory, picks an efficient route,
+   walks zone A → B → C, perceiving each waypoint.
+4. Agent finds `chair_3` is missing from zone A and `rogue_box` is present in
+   zone B but not on the manifest — calls `report_discrepancy` for each.
+5. Robot speaks the audit summary aloud (Web Speech TTS) before calling `done`.
+6. Operator drags `chair_3` onto the floor and re-runs — manifest passes.
 
 ## What's in it
 

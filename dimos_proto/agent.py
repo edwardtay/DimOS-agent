@@ -39,6 +39,10 @@ calling tools against the robot. Rules:
   discoveries (e.g. an object's last-known position), `recall(query)` to
   retrieve them. At the start of a mission, prior memories are injected for
   you; use them to skip rediscovery, but verify before trusting old positions.
+- For warehouse inspection: the current manifest and zone bounds are injected
+  at mission start. Walk the zones, perceive what's actually there, and call
+  `report_discrepancy(name, kind, note)` for each mismatch. Use `say` to
+  speak a final summary to the operator before calling `done`.
 - When the goal is satisfied (or cannot be), call `done` with a one-sentence
   summary including any failure reason.
 - Keep reasoning text terse. Operators care about actions, not narration.
@@ -61,12 +65,23 @@ def run(
     client = Anthropic()
 
     prior = memory.all()
-    preamble = ""
+    parts: list[str] = []
+    if robot.manifest:
+        manifest_lines = [f"  {m['name']} -> zone {m['zone']}" for m in robot.manifest]
+        zone_lines = [f"  {z}: x in [{x1},{x2}], y in [{y1},{y2}]"
+                      for z, (x1, y1, x2, y2) in robot.zones.items()]
+        parts.append(
+            "Warehouse manifest (expected):\n" + "\n".join(manifest_lines)
+            + "\nZones:\n" + "\n".join(zone_lines)
+        )
     if prior:
-        preamble = ("Prior memory (verify before relying on positional facts):\n"
-                    + "\n".join(f"  {k} = {v}" for k, v in prior.items()) + "\n\n")
+        parts.append("Prior memory (verify before relying on positional facts):\n"
+                     + "\n".join(f"  {k} = {v}" for k, v in prior.items()))
+    preamble = ("\n\n".join(parts) + "\n\n") if parts else ""
     messages: list[dict] = [{"role": "user", "content": preamble + "Goal: " + goal}]
     yield f"GOAL: {goal}"
+    if robot.manifest:
+        yield f"  manifest: {len(robot.manifest)} expected item(s) across {len(robot.zones)} zone(s)"
     if prior:
         yield f"  memory: loaded {len(prior)} fact(s)"
 
