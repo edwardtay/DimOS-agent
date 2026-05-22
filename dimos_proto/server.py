@@ -17,11 +17,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .agent import run as agent_run
-from .go2_sim import Go2Sim
+from .go2_sim import Fleet
 from .memory import AgentMemory
 
 app = FastAPI()
-ROBOT = Go2Sim()
+FLEET = Fleet.default()
+ROBOT = FLEET.get(None)  # primary, used for shared-world edits
 MEMORY = AgentMemory()
 LOCK = threading.Lock()
 CANCEL = threading.Event()
@@ -91,13 +92,23 @@ def _notes_shell(markdown: str) -> str:
 @app.get("/state")
 def state() -> JSONResponse:
     with LOCK:
+        primary = FLEET.get(None)
         return JSONResponse({
-            "pose": {"x": ROBOT.x, "y": ROBOT.y, "heading_deg": ROBOT.heading_deg},
-            "battery": ROBOT.battery,
-            "posture": ROBOT.posture,
-            "emergency_stop": ROBOT.emergency_stop,
+            "robots": [
+                {"id": rid,
+                 "pose": {"x": r.x, "y": r.y, "heading_deg": r.heading_deg},
+                 "battery": r.battery, "posture": r.posture,
+                 "emergency_stop": r.emergency_stop,
+                 "primary": rid == FLEET.primary_id}
+                for rid, r in FLEET.robots.items()
+            ],
+            # legacy fields (primary robot) for back-compat with the canvas HUD
+            "pose": {"x": primary.x, "y": primary.y, "heading_deg": primary.heading_deg},
+            "battery": primary.battery,
+            "posture": primary.posture,
+            "emergency_stop": primary.emergency_stop,
             "world": [{"name": o.name, "tag": o.tag, "x": o.x, "y": o.y}
-                      for o in ROBOT.world],
+                      for o in primary.world],
             "obstacles": [
                 {"x1": p[0], "y1": p[1], "x2": q[0], "y2": q[1]}
                 for (p, q) in ROBOT.obstacles
@@ -114,9 +125,10 @@ def state() -> JSONResponse:
 
 @app.post("/reset")
 def reset() -> dict:
-    global ROBOT
+    global FLEET, ROBOT
     with LOCK:
-        ROBOT = Go2Sim()
+        FLEET = Fleet.default()
+        ROBOT = FLEET.get(None)
     CANCEL.clear()
     return {"ok": True}
 
@@ -128,10 +140,11 @@ class EStopBody(BaseModel):
 @app.post("/estop")
 def estop(body: EStopBody) -> dict:
     with LOCK:
-        ROBOT.set_emergency_stop(body.active)
+        for r in FLEET.robots.values():
+            r.set_emergency_stop(body.active)
     if body.active:
         CANCEL.set()
-    return {"emergency_stop": ROBOT.emergency_stop}
+    return {"emergency_stop": body.active}
 
 
 @app.post("/cancel")
@@ -194,7 +207,7 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
 
     def worker() -> None:
         try:
-            for line in agent_run(goal, ROBOT, CANCEL, MEMORY):
+            for line in agent_run(goal, FLEET, CANCEL, MEMORY):
                 q.put(line)
         except Exception as e:
             q.put(f"ERROR: {type(e).__name__}: {e}")
@@ -457,29 +470,44 @@ function draw() {
     ctx.fillText(o.name, px+12, py+4);
   }
 
-  // robot
-  const rx = cx + state.pose.x*scale, ry = cy - state.pose.y*scale;
-  const h = state.pose.heading_deg * Math.PI/180;
-  ctx.fillStyle = 'rgba(42,109,244,0.14)';
-  ctx.beginPath();
-  ctx.moveTo(rx,ry);
-  ctx.arc(rx,ry, 5*scale, -h - Math.PI/4, -h + Math.PI/4);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = state.emergency_stop ? getCss('--danger') : getCss('--accent');
-  ctx.beginPath(); ctx.arc(rx,ry,10,0,Math.PI*2); ctx.fill();
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(rx,ry);
-  ctx.lineTo(rx + Math.cos(-h)*18, ry + Math.sin(-h)*18); ctx.stroke();
+  // robots (every robot in the fleet)
+  const robotPalette = ['#2a6df4', '#1f8a4c', '#b4791a', '#8a3fc4'];
+  const fovPalette   = ['rgba(42,109,244,0.14)', 'rgba(31,138,76,0.14)',
+                        'rgba(180,121,26,0.14)', 'rgba(138,63,196,0.14)'];
+  const robots = state.robots || [{id:'go2-1', pose:state.pose,
+    battery:state.battery, posture:state.posture, emergency_stop:state.emergency_stop, primary:true}];
+  robots.forEach((rb, i) => {
+    const rx = cx + rb.pose.x*scale, ry = cy - rb.pose.y*scale;
+    const h = rb.pose.heading_deg * Math.PI/180;
+    const color = robotPalette[i % robotPalette.length];
+    const fov   = fovPalette[i % fovPalette.length];
+    ctx.fillStyle = fov;
+    ctx.beginPath(); ctx.moveTo(rx,ry);
+    ctx.arc(rx,ry, 5*scale, -h - Math.PI/4, -h + Math.PI/4);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = rb.emergency_stop ? getCss('--danger') : color;
+    ctx.beginPath(); ctx.arc(rx,ry,10,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(rx,ry);
+    ctx.lineTo(rx + Math.cos(-h)*18, ry + Math.sin(-h)*18); ctx.stroke();
+    ctx.fillStyle = color; ctx.font = '11px ui-monospace';
+    ctx.fillText(rb.id, rx + 14, ry - 12);
+  });
 
-  // HUD
-  const bClass = state.battery < 15 ? 'bat-low' : '';
-  hud.innerHTML =
-    `<span>pose <b>(${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})</b></span>` +
-    `<span>heading <b>${state.pose.heading_deg.toFixed(0)}°</b></span>` +
-    `<span>posture <b>${state.posture}</b></span>` +
-    `<span class="${bClass}">battery <b>${state.battery.toFixed(1)}%</b></span>` +
-    (usage.in_tok ? `<span>tokens <b>${usage.in_tok}/${usage.out_tok}</b> · <b>$${usage.cost.toFixed(4)}</b></span>` : '');
-  banner.classList.toggle('on', !!state.emergency_stop);
+  // HUD — one line per robot, plus shared token telemetry
+  const lines = (state.robots || []).map(rb => {
+    const bClass = rb.battery < 15 ? 'bat-low' : '';
+    return `<span><b>${rb.id}</b> · (${rb.pose.x.toFixed(2)},${rb.pose.y.toFixed(2)})`
+      + ` · ${rb.pose.heading_deg.toFixed(0)}°`
+      + ` · ${rb.posture}`
+      + ` · <span class="${bClass}">${rb.battery.toFixed(0)}%</span></span>`;
+  });
+  if (usage.in_tok)
+    lines.push(`<span>tokens <b>${usage.in_tok}/${usage.out_tok}</b> · <b>$${usage.cost.toFixed(4)}</b></span>`);
+  hud.innerHTML = lines.join('');
+  const anyEstop = (state.robots || []).some(r => r.emergency_stop)
+                || !!state.emergency_stop;
+  banner.classList.toggle('on', anyEstop);
 }
 function getCss(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
@@ -584,7 +612,8 @@ document.getElementById('reset').onclick = async () => {
 };
 const estopBtn = document.getElementById('estop');
 estopBtn.onclick = async () => {
-  const active = !state?.emergency_stop;
+  const anyOn = (state?.robots || []).some(r => r.emergency_stop) || state?.emergency_stop;
+  const active = !anyOn;
   await fetch('/estop', {method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify({active})});
   estopBtn.classList.toggle('active', active);

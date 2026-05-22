@@ -10,8 +10,9 @@ import pytest
 # avoid touching the real log on disk during tests
 os.environ.setdefault("DIMOS_LOG", "/tmp/dimos_test_missions.jsonl")
 
-from dimos_proto.go2_sim import Go2Sim, WorldObject
+from dimos_proto.go2_sim import Fleet, Go2Sim, WorldObject
 from dimos_proto.memory import AgentMemory
+from dimos_proto.tools import dispatch
 
 
 @pytest.fixture
@@ -118,6 +119,37 @@ def test_seed_world_has_known_gap(robot: Go2Sim) -> None:
     manifest_names = {m["name"] for m in robot.manifest}
     assert "chair_3" in manifest_names and "chair_3" not in names_in_world
     assert "rogue_box" in names_in_world and "rogue_box" not in manifest_names
+
+
+def test_fleet_shares_world() -> None:
+    f = Fleet.default()
+    assert set(f.robots.keys()) == {"go2-1", "go2-2"}
+    # mutating manifest via one robot is visible via the other
+    f.robots["go2-1"].manifest.append({"name": "extra_item", "zone": "C"})
+    assert any(m["name"] == "extra_item" for m in f.robots["go2-2"].manifest)
+
+
+def test_fleet_summary_shape() -> None:
+    f = Fleet.default()
+    s = f.summary()
+    assert len(s) == 2
+    for entry in s:
+        assert {"id", "pose", "battery", "posture", "emergency_stop", "zone"} <= entry.keys()
+
+
+def test_dispatch_targets_robot_by_id() -> None:
+    f = Fleet.default()
+    out = dispatch(f, "turn", {"degrees": 45, "robot_id": "go2-2"})
+    assert "heading" in out
+    assert f.robots["go2-2"].heading_deg == pytest.approx((90.0 + 45.0) % 360.0)
+    assert f.robots["go2-1"].heading_deg == pytest.approx(90.0)  # untouched
+
+
+def test_dispatch_list_fleet() -> None:
+    f = Fleet.default()
+    out = dispatch(f, "list_fleet", {})
+    assert isinstance(out, list) and len(out) == 2
+    assert {r["id"] for r in out} == {"go2-1", "go2-2"}
 
 
 def test_memory_roundtrip(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from typing import Iterator
 
 from anthropic import Anthropic
 
-from .go2_sim import Go2Sim
+from .go2_sim import Fleet, Go2Sim
 from .memory import AgentMemory
 from .tools import TOOLS, dispatch
 
@@ -20,10 +20,14 @@ MAX_STEPS = 25
 PRICE_IN = 3.0 / 1_000_000
 PRICE_OUT = 15.0 / 1_000_000
 
-SYSTEM = """You are DimOS-Agent, the brain of a Unitree Go2 quadruped.
+SYSTEM = """You are DimOS-Agent, the brain coordinating a fleet of Unitree Go2 quadrupeds.
 
 You receive natural-language goals from an operator and accomplish them by
-calling tools against the robot. Rules:
+calling tools against one or more robots. Every robot-level tool accepts an
+optional `robot_id`; omit it to target the primary inspector. Use
+`list_fleet` to see what robots are available.
+
+Rules:
 
 - Always `perceive` before acting if you lack fresh sensor data.
 - Move in small steps (<= 1.0 m) and re-perceive frequently.
@@ -43,6 +47,9 @@ calling tools against the robot. Rules:
   at mission start. Walk the zones, perceive what's actually there, and call
   `report_discrepancy(name, kind, note)` for each mismatch. Use `say` to
   speak a final summary to the operator before calling `done`.
+- When more than one robot is available, split the work: send go2-1 to one
+  zone and go2-2 to another, then aggregate findings. You can call multiple
+  tools (with different `robot_id`s) in a single response to act in parallel.
 - When the goal is satisfied (or cannot be), call `done` with a one-sentence
   summary including any failure reason.
 - Keep reasoning text terse. Operators care about actions, not narration.
@@ -51,21 +58,33 @@ calling tools against the robot. Rules:
 
 def run(
     goal: str,
-    robot: Go2Sim | None = None,
+    target: Fleet | Go2Sim | None = None,
     cancel: threading.Event | None = None,
     memory: AgentMemory | None = None,
 ) -> Iterator[str]:
     """Yield human-readable trace lines while executing `goal`.
 
-    If `cancel` is set mid-loop, the agent stops at the next step boundary.
+    `target` may be a single Go2Sim (backwards-compatible) or a Fleet. If
+    `cancel` is set mid-loop, the agent stops at the next step boundary.
     """
-    robot = robot or Go2Sim()
+    if target is None:
+        target = Fleet.default()
+    if isinstance(target, Go2Sim):
+        # wrap in a one-robot fleet so the rest of the loop is uniform
+        f = Fleet()
+        f.robots["go2-1"] = target
+        target = f
+    fleet: Fleet = target
+    robot = fleet.get(None)  # primary, for preamble facts
     cancel = cancel or threading.Event()
     memory = memory or AgentMemory()
     client = Anthropic()
 
     prior = memory.all()
     parts: list[str] = []
+    if len(fleet.robots) > 1:
+        roster = ", ".join(fleet.robots.keys())
+        parts.append(f"Fleet roster: {roster}. Primary is '{fleet.primary_id}'.")
     if robot.manifest:
         manifest_lines = [f"  {m['name']} -> zone {m['zone']}" for m in robot.manifest]
         zone_lines = [f"  {z}: x in [{x1},{x2}], y in [{y1},{y2}]"
@@ -80,6 +99,8 @@ def run(
     preamble = ("\n\n".join(parts) + "\n\n") if parts else ""
     messages: list[dict] = [{"role": "user", "content": preamble + "Goal: " + goal}]
     yield f"GOAL: {goal}"
+    if len(fleet.robots) > 1:
+        yield f"  fleet: {len(fleet.robots)} robot(s) — {', '.join(fleet.robots.keys())}"
     if robot.manifest:
         yield f"  manifest: {len(robot.manifest)} expected item(s) across {len(robot.zones)} zone(s)"
     if prior:
@@ -128,7 +149,7 @@ def run(
             if cancel.is_set():
                 yield "CANCELLED by operator."
                 return
-            result = dispatch(robot, block.name, block.input, memory)
+            result = dispatch(fleet, block.name, block.input, memory)
             yield f"  -> {block.name}({_fmt_args(block.input)}) = {_fmt_result(result)}"
             if isinstance(result, dict) and result.get("_done"):
                 finished = True
