@@ -152,6 +152,19 @@ def test_dispatch_list_fleet() -> None:
     assert {r["id"] for r in out} == {"go2-1", "go2-2"}
 
 
+def test_vision_renders_png_or_skips() -> None:
+    from dimos_proto.vision import render_top_down, _HAS_PIL
+    r = Go2Sim()
+    out = render_top_down(r)
+    if _HAS_PIL:
+        assert isinstance(out, str) and len(out) > 500  # base64 PNG
+        # validate it really is PNG bytes
+        import base64
+        assert base64.b64decode(out)[:8] == b"\x89PNG\r\n\x1a\n"
+    else:
+        assert out is None
+
+
 def test_memory_roundtrip(tmp_path: Path) -> None:
     m = AgentMemory(tmp_path / "mem.json")
     m.remember("alice_seen", "(3, 0.5)")

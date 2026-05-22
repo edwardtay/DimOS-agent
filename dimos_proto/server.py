@@ -27,6 +27,21 @@ MEMORY = AgentMemory()
 LOCK = threading.Lock()
 CANCEL = threading.Event()
 
+# Rough per-discrepancy labor cost. Industry benchmark for human cycle-count
+# labor in a warehouse is ~$0.20-$0.40 per SKU touched; a discrepancy caught
+# early prevents downstream fulfillment errors that average ~$50-$80 to remediate.
+LABOR_SAVED_PER_DISCREPANCY_USD = 65.0
+
+ANALYTICS = {
+    "missions_run": 0,
+    "missions_completed": 0,
+    "missions_cancelled": 0,
+    "discrepancies_caught": 0,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "total_cost_usd": 0.0,
+}
+
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
@@ -87,6 +102,26 @@ def _notes_shell(markdown: str) -> str:
  document.getElementById('md').innerHTML = marked.parse(raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>'));
 </script>
 </body></html>"""
+
+
+@app.get("/analytics")
+def analytics() -> JSONResponse:
+    saved = ANALYTICS["discrepancies_caught"] * LABOR_SAVED_PER_DISCREPANCY_USD
+    cost = ANALYTICS["total_cost_usd"]
+    roi = (saved / cost) if cost > 0 else None
+    return JSONResponse({
+        **ANALYTICS,
+        "labor_saved_usd": round(saved, 2),
+        "roi_multiple": round(roi, 1) if roi is not None else None,
+        "labor_saved_per_discrepancy_usd": LABOR_SAVED_PER_DISCREPANCY_USD,
+    })
+
+
+@app.post("/analytics/reset")
+def analytics_reset() -> dict:
+    for k in ANALYTICS:
+        ANALYTICS[k] = 0 if isinstance(ANALYTICS[k], int) else 0.0
+    return {"ok": True}
 
 
 @app.get("/state")
@@ -204,14 +239,35 @@ def run_goal(goal: str, api_key: str | None = None) -> StreamingResponse:
 
     CANCEL.clear()
     q: queue.Queue[str | None] = queue.Queue()
+    ANALYTICS["missions_run"] += 1
+    disc_before = len(FLEET.get(None).discrepancies)
 
     def worker() -> None:
+        outcome = "incomplete"
         try:
             for line in agent_run(goal, FLEET, CANCEL, MEMORY):
                 q.put(line)
+                if line.startswith("DONE:"):
+                    outcome = "completed"
+                elif line.startswith("CANCELLED"):
+                    outcome = "cancelled"
+                elif line.startswith("USAGE:"):
+                    import re
+                    m = re.search(r"in=(\d+)\s+out=(\d+)\s+cost=\$([\d.]+)", line)
+                    if m:
+                        ANALYTICS["total_input_tokens"]  += int(m.group(1))
+                        ANALYTICS["total_output_tokens"] += int(m.group(2))
+                        ANALYTICS["total_cost_usd"]      += float(m.group(3))
         except Exception as e:
             q.put(f"ERROR: {type(e).__name__}: {e}")
         finally:
+            if outcome == "completed":
+                ANALYTICS["missions_completed"] += 1
+            elif outcome == "cancelled":
+                ANALYTICS["missions_cancelled"] += 1
+            new_disc = len(FLEET.get(None).discrepancies) - disc_before
+            if new_disc > 0:
+                ANALYTICS["discrepancies_caught"] += new_disc
             q.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -286,6 +342,9 @@ INDEX_HTML = r"""<!doctype html>
  .t-cancel { color:var(--danger); font-weight:600; }
  .t-usage { color:var(--muted); font-style:italic; }
  .kv { color:var(--muted); font-size:12px; }
+ #demo { background:linear-gradient(180deg,#2a6df4,#1d4fb3); color:#fff;
+   font-weight:600; flex:1; padding:11px 14px; }
+ #demo:hover { background:#1d4fb3; }
  #mic.recording { background:var(--danger); color:#fff; border-color:var(--danger);
    animation: pulse 1s infinite; }
  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.5;} }
@@ -301,6 +360,20 @@ INDEX_HTML = r"""<!doctype html>
  .discrepancies .d-item { background:#fdecec; border-color:#f3c5c5; color:var(--danger); font-weight:500; }
  .discrepancies .d-item.kind-extra { background:#fff5e0; border-color:#f0d28a; color:#8a5a14; }
  .discrepancies .d-item.kind-wrong_zone { background:#fff5e0; border-color:#f0d28a; color:#8a5a14; }
+ .analytics { margin-top:10px; display:grid;
+   grid-template-columns: repeat(4, 1fr); gap:6px; }
+ .analytics:empty { display:none; }
+ .analytics .stat {
+   padding:8px 10px; background:#fff; border:1px solid var(--border);
+   border-radius:8px; display:flex; flex-direction:column; gap:2px;
+ }
+ .analytics .stat .label {
+   font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;
+ }
+ .analytics .stat .value { font-size:15px; font-weight:600; color:var(--text); }
+ .analytics .stat.hero { background:linear-gradient(180deg,#eef9f1,#fff);
+   border-color:#bfe3cc; grid-column: span 2; }
+ .analytics .stat.hero .value { color:var(--good); font-size:18px; }
  .manifest-block { margin-top:10px; font-size:12px; color:var(--muted); }
  .manifest-block summary { cursor:pointer; padding:4px 0; user-select:none; }
  .manifest-block textarea { width:100%; margin-top:6px; padding:8px; border-radius:6px;
@@ -356,13 +429,20 @@ INDEX_HTML = r"""<!doctype html>
         <button id="go">Run</button>
       </div>
       <div class="row" style="margin-top:8px;">
-        <button id="cancel" class="danger" disabled>Cancel mission</button>
+        <button id="demo" title="one-click demo: load canonical inspection goal and run">
+          ▶ Run Daily Inspection
+        </button>
+        <button id="cancel" class="danger" disabled>Cancel</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
         <button id="reset" class="secondary">Reset world</button>
         <button id="forget" class="secondary" title="clear agent memory">forget all</button>
+        <button id="analytics-reset" class="secondary" title="reset ROI counters">reset ROI</button>
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">
           <input type="checkbox" id="tts" checked> speech
         </label>
       </div>
+      <div id="analytics" class="analytics"></div>
       <div id="queue" class="queue"></div>
       <div id="discrepancies" class="discrepancies"></div>
       <div id="memory" class="memory"></div>
@@ -607,6 +687,18 @@ goBtn.onclick = () => {
   es.onerror = () => { addLine('ERROR: stream closed'); es.close(); goBtn.disabled=false; cancelBtn.disabled=true; };
 };
 cancelBtn.onclick = () => fetch('/cancel', {method:'POST'});
+
+document.getElementById('demo').onclick = () => {
+  document.getElementById('goal').value =
+    "Run a full daily inspection. Send go2-1 to walk zone A and go2-2 to walk zone B "
+    + "in parallel; then either robot walks zone C. Compare what you perceive to the "
+    + "manifest and report every discrepancy. Speak a final audit summary aloud before done.";
+  goBtn.click();
+};
+
+document.getElementById('analytics-reset').onclick = async () => {
+  await fetch('/analytics/reset', {method:'POST'}); refreshAnalytics();
+};
 document.getElementById('reset').onclick = async () => {
   await fetch('/reset', {method:'POST'}); trace.innerHTML=''; usage = {in_tok:0,out_tok:0,cost:0}; refresh();
 };
@@ -670,6 +762,31 @@ else {
   rec.onend = () => { recording = false; micBtn.classList.remove('recording'); };
   rec.onerror = () => { recording = false; micBtn.classList.remove('recording'); };
 }
+
+// --- analytics ---
+async function refreshAnalytics() {
+  try {
+    const r = await fetch('/analytics'); const a = await r.json();
+    const el = document.getElementById('analytics');
+    const fmt = (n) => n == null ? '—' : (typeof n === 'number' ?
+      (Math.abs(n) >= 100 ? n.toFixed(0) : n.toFixed(2)) : n);
+    const dollars = (n) => '$' + (n||0).toFixed(2);
+    el.innerHTML =
+      `<div class="stat hero"><span class="label">labor $ saved</span>
+         <span class="value">${dollars(a.labor_saved_usd)}</span></div>
+       <div class="stat"><span class="label">ROI</span>
+         <span class="value">${a.roi_multiple != null ? a.roi_multiple + '×' : '—'}</span></div>
+       <div class="stat"><span class="label">discrepancies</span>
+         <span class="value">${a.discrepancies_caught}</span></div>
+       <div class="stat"><span class="label">missions</span>
+         <span class="value">${a.missions_completed}/${a.missions_run}</span></div>
+       <div class="stat"><span class="label">tokens</span>
+         <span class="value">${(a.total_input_tokens+a.total_output_tokens).toLocaleString()}</span></div>
+       <div class="stat"><span class="label">total spend</span>
+         <span class="value">${dollars(a.total_cost_usd)}</span></div>`;
+  } catch(e) {}
+}
+setInterval(refreshAnalytics, 1500); refreshAnalytics();
 
 // --- memory display + clear ---
 async function refreshMemory() {

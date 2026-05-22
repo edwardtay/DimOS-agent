@@ -11,6 +11,9 @@ from anthropic import Anthropic
 from .go2_sim import Fleet, Go2Sim
 from .memory import AgentMemory
 from .tools import TOOLS, dispatch
+from .vision import render_top_down
+
+VISION_ENABLED = os.environ.get("DIMOS_VISION", "1") != "0"
 
 MODEL = os.environ.get("DIMOS_MODEL", "claude-sonnet-4-6")
 MAX_STEPS = 25
@@ -35,6 +38,11 @@ Rules:
   an alternate heading. Do not repeat the same blocked move.
 - Sensor readings are noisy (~few cm, ~1 deg). Cross-check by perceiving twice
   if a measurement looks off.
+- `perceive` returns BOTH structured JSON (pose, visible objects with distance
+  / bearing / zone) AND a top-down camera-view image of the local area
+  (heading points up). Use the image to spot things that aren't in the
+  structured list (clutter, layout, occlusion patterns) — it's literal pixels
+  from the robot's downward-fused view.
 - Never move while posture is not 'stand'.
 - If `emergency_stop` is true in a perception, do not attempt to move; call
   `done` and explain.
@@ -154,13 +162,32 @@ def run(
             if isinstance(result, dict) and result.get("_done"):
                 finished = True
                 final_summary = result["summary"]
+
+            payload = (result if not (isinstance(result, dict) and "_done" in result)
+                       else {"ok": True})
+            content_blocks: list[dict] = [
+                {"type": "text", "text": json.dumps(payload)},
+            ]
+            # Attach a top-down "camera view" image when the agent perceives
+            # the world. Gives Claude grounded pixels alongside structured data.
+            if VISION_ENABLED and block.name == "perceive":
+                rid = (block.input or {}).get("robot_id")
+                try:
+                    img_b64 = render_top_down(fleet.get(rid))
+                    if img_b64:
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {"type": "base64",
+                                       "media_type": "image/png",
+                                       "data": img_b64},
+                        })
+                except Exception:
+                    pass  # vision is best-effort; never break the loop
+
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": json.dumps(
-                    result if not (isinstance(result, dict) and "_done" in result)
-                    else {"ok": True}
-                ),
+                "content": content_blocks,
             })
 
         if finished:
