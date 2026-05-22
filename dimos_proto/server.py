@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import threading
+from pathlib import Path
 from typing import Iterator
 
 from fastapi import FastAPI
@@ -29,6 +30,62 @@ CANCEL = threading.Event()
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
+
+
+@app.get("/notes", response_class=HTMLResponse)
+def notes() -> str:
+    """Private ELI5 brief. Reads NOTES.md from disk so the content stays local
+    (the file is gitignored). Only reachable on localhost."""
+    candidates = [Path.cwd() / "NOTES.md",
+                  Path(__file__).resolve().parent.parent / "NOTES.md"]
+    text = None
+    for p in candidates:
+        if p.exists():
+            text = p.read_text()
+            break
+    if text is None:
+        return _notes_shell("NOTES.md not found on this machine.")
+    return _notes_shell(text)
+
+
+def _notes_shell(markdown: str) -> str:
+    safe = (markdown
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>NOTES · private</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+ body {{ max-width: 760px; margin: 40px auto; padding: 0 24px 80px;
+   font: 15px/1.6 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+   color: #1a1f29; background: #fffdf6; }}
+ h1, h2, h3 {{ line-height: 1.25; }}
+ h1 {{ font-size: 26px; border-bottom: 1px solid #e8d8a0; padding-bottom: 8px; }}
+ h2 {{ font-size: 19px; margin-top: 32px; }}
+ code {{ font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+   background: #f0eadb; padding: 2px 5px; border-radius: 4px; }}
+ pre code {{ display: block; padding: 12px; overflow-x: auto; }}
+ table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+ th, td {{ border: 1px solid #e3d8b8; padding: 6px 10px; text-align: left; font-size: 13px; }}
+ th {{ background: #f7efd0; }}
+ blockquote {{ border-left: 4px solid #d4b840; margin: 0; padding: 8px 14px;
+   background: #fff8d6; color: #6a5212; font-size: 14px; }}
+ .pill {{ display: inline-block; padding: 2px 9px; border-radius: 999px;
+   background: #d4b840; color: #fff; font-size: 11px; font-weight: 600;
+   letter-spacing: .05em; vertical-align: middle; margin-left: 8px; }}
+ a.back {{ display: inline-block; margin-bottom: 10px; color: #6a5212; font-size: 13px; }}
+</style></head><body>
+<a class="back" href="/">← back to operator console</a>
+<span class="pill">PRIVATE · localhost only</span>
+<article id="md"></article>
+<script>
+ const raw = {json.dumps(safe)};
+ document.getElementById('md').innerHTML = marked.parse(raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>'));
+</script>
+</body></html>"""
 
 
 @app.get("/state")
@@ -270,6 +327,7 @@ INDEX_HTML = r"""<!doctype html>
   <h1>DIMOS · GO2 OPERATOR CONSOLE</h1>
   <span class="badge">localhost simulator</span>
   <span class="badge">Claude tool-use loop</span>
+  <a href="/notes" target="_blank" class="badge" style="text-decoration:none;">📓 notes</a>
   <button class="estop" id="estop">EMERGENCY STOP</button>
 </header>
 <main>

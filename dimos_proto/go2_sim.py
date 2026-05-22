@@ -283,3 +283,49 @@ class Go2Sim:
                 self._record("recharge", battery=100.0)
                 return "battery recharged to 100%"
         return self._refuse("not_at_dock")
+
+
+@dataclass
+class Fleet:
+    """A handful of Go2s sharing one world, manifest, and discrepancy log."""
+    robots: dict[str, Go2Sim] = field(default_factory=dict)
+    primary_id: str = "go2-1"
+
+    @classmethod
+    def default(cls) -> "Fleet":
+        f = cls()
+        f.robots["go2-1"] = Go2Sim(x=-3.5, y=-3.0, heading_deg=90.0)
+        f.robots["go2-2"] = Go2Sim(x=3.5, y=-3.0, heading_deg=90.0)
+        # All robots share the same physical world (objects, walls, zones,
+        # manifest, discrepancies). Each keeps its own pose, battery, log.
+        p = f.robots[f.primary_id]
+        for r in f.robots.values():
+            if r is p:
+                continue
+            r.world = p.world
+            r.obstacles = p.obstacles
+            r.zones = p.zones
+            r.manifest = p.manifest
+            r.discrepancies = p.discrepancies
+        return f
+
+    def get(self, robot_id: str | None) -> Go2Sim:
+        if robot_id is None:
+            return self.robots[self.primary_id]
+        if robot_id not in self.robots:
+            raise KeyError(f"unknown robot_id '{robot_id}'")
+        return self.robots[robot_id]
+
+    def summary(self) -> list[dict]:
+        return [
+            {
+                "id": rid,
+                "pose": {"x": round(r.x, 2), "y": round(r.y, 2),
+                         "heading_deg": round(r.heading_deg, 1)},
+                "battery": round(r.battery, 1),
+                "posture": r.posture,
+                "emergency_stop": r.emergency_stop,
+                "zone": r.zone_of(r.x, r.y),
+            }
+            for rid, r in self.robots.items()
+        ]

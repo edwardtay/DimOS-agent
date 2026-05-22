@@ -16,6 +16,9 @@ missions.jsonl
 memory.json
 .pytest_cache/
 
+# Private notes (ELI5 brief, not for public)
+NOTES.md
+
 # OS / editor
 .DS_Store
 .idea/
